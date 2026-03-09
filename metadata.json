@@ -1,0 +1,5 @@
+{
+  "name": "Mandelbrot ILP Showcase",
+  "description": "An interactive animation demonstrating Instruction Level Parallelism (ILP) by comparing non-unrolled and unrolled Mandelbrot loops",
+  "requestFramePermissions": []
+}
