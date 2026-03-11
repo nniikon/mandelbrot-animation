@@ -1,376 +1,553 @@
-/**
- * @license
- * SPDX-License-Identifier: Apache-2.0
- */
-
 import React, { useState, useEffect, useMemo } from 'react';
-import { Play, Pause, SkipForward, RotateCcw } from 'lucide-react';
+import { Play, Square, ChevronLeft, ChevronRight, Settings2, FastForward, Rewind } from 'lucide-react';
+import { motion, AnimatePresence } from 'motion/react';
 
-const CONFIG = {
-  fetchWidth: 4,
-  robSize: 24,
-  alus: { FP: 4, INT: 2 }
+// --- Instruction Templates ---
+
+const nonUnrolledTemplate = [
+  { id: "I1", op: "vaddps", type: "FP", latency: 3, deps: [{id:"I10", prev:true}, {id:"I11", prev:true}] },
+  { id: "I2", op: "vcmpltps", type: "FP", latency: 3, deps: [{id:"I1", prev:false}] },
+  { id: "I3", op: "vtestps", type: "FP", latency: 1, deps: [{id:"I2", prev:false}] },
+  { id: "I4", op: "je", type: "INT", latency: 1, deps: [{id:"I3", prev:false}] },
+  { id: "I5", op: "vsubps", type: "FP", latency: 3, deps: [{id:"I10", prev:true}, {id:"I11", prev:true}] },
+  { id: "I6", op: "vaddps", type: "FP", latency: 3, deps: [{id:"I5", prev:false}] },
+  { id: "I7", op: "vaddps", type: "FP", latency: 3, deps: [{id:"I12", prev:true}] },
+  { id: "I8", op: "vaddps", type: "FP", latency: 3, deps: [{id:"I7", prev:false}] },
+  { id: "I9", op: "vpsubd", type: "FP", latency: 1, deps: [{id:"I2", prev:false}, {id:"I9", prev:true}] },
+  { id: "I10", op: "vmulps", type: "FP", latency: 3, deps: [{id:"I6", prev:false}] },
+  { id: "I11", op: "vmulps", type: "FP", latency: 3, deps: [{id:"I8", prev:false}] },
+  { id: "I12", op: "vmulps", type: "FP", latency: 3, deps: [{id:"I6", prev:false}, {id:"I8", prev:false}] },
+  { id: "I13", op: "dec", type: "INT", latency: 1, deps: [{id:"I13", prev:true}] },
+  { id: "I14", op: "jne", type: "INT", latency: 1, deps: [{id:"I13", prev:false}] }
+];
+
+const unrolledTemplate = [
+  { id: "I1", op: "vaddps", type: "FP", latency: 3, deps: [{id:"I23", prev:true}, {id:"I25", prev:true}] },
+  { id: "I2", op: "vaddps", type: "FP", latency: 3, deps: [{id:"I24", prev:true}, {id:"I26", prev:true}] },
+  { id: "I3", op: "vcmpltps", type: "FP", latency: 3, deps: [{id:"I1", prev:false}] },
+  { id: "I4", op: "vextractf128", type: "FP", latency: 1, deps: [{id:"I3", prev:false}] },
+  { id: "I5", op: "vpackssdw", type: "FP", latency: 1, deps: [{id:"I3", prev:false}, {id:"I4", prev:false}] },
+  { id: "I6", op: "vcmpltps", type: "FP", latency: 3, deps: [{id:"I2", prev:false}] },
+  { id: "I7", op: "vextractf128", type: "FP", latency: 1, deps: [{id:"I6", prev:false}] },
+  { id: "I8", op: "vpackssdw", type: "FP", latency: 1, deps: [{id:"I6", prev:false}, {id:"I7", prev:false}] },
+  { id: "I9", op: "vpacksswb", type: "FP", latency: 1, deps: [{id:"I8", prev:false}, {id:"I5", prev:false}] },
+  { id: "I10", op: "vpmovmskb", type: "FP", latency: 1, deps: [{id:"I9", prev:false}] },
+  { id: "I11", op: "test", type: "INT", latency: 1, deps: [{id:"I10", prev:false}] },
+  { id: "I12", op: "je", type: "INT", latency: 1, deps: [{id:"I11", prev:false}] },
+  { id: "I13", op: "vsubps", type: "FP", latency: 3, deps: [{id:"I23", prev:true}, {id:"I25", prev:true}] },
+  { id: "I14", op: "vaddps", type: "FP", latency: 3, deps: [{id:"I13", prev:false}] },
+  { id: "I15", op: "vsubps", type: "FP", latency: 3, deps: [{id:"I24", prev:true}, {id:"I26", prev:true}] },
+  { id: "I16", op: "vaddps", type: "FP", latency: 3, deps: [{id:"I15", prev:false}] },
+  { id: "I17", op: "vaddps", type: "FP", latency: 3, deps: [{id:"I27", prev:true}] },
+  { id: "I18", op: "vaddps", type: "FP", latency: 3, deps: [{id:"I17", prev:false}] },
+  { id: "I19", op: "vaddps", type: "FP", latency: 3, deps: [{id:"I28", prev:true}] },
+  { id: "I20", op: "vaddps", type: "FP", latency: 3, deps: [{id:"I19", prev:false}] },
+  { id: "I21", op: "vpsubd", type: "FP", latency: 1, deps: [{id:"I3", prev:false}, {id:"I21", prev:true}] },
+  { id: "I22", op: "vpsubd", type: "FP", latency: 1, deps: [{id:"I6", prev:false}, {id:"I22", prev:true}] },
+  { id: "I23", op: "vmulps", type: "FP", latency: 3, deps: [{id:"I14", prev:false}] },
+  { id: "I24", op: "vmulps", type: "FP", latency: 3, deps: [{id:"I16", prev:false}] },
+  { id: "I25", op: "vmulps", type: "FP", latency: 3, deps: [{id:"I18", prev:false}] },
+  { id: "I26", op: "vmulps", type: "FP", latency: 3, deps: [{id:"I20", prev:false}] },
+  { id: "I27", op: "vmulps", type: "FP", latency: 3, deps: [{id:"I14", prev:false}, {id:"I18", prev:false}] },
+  { id: "I28", op: "vmulps", type: "FP", latency: 3, deps: [{id:"I20", prev:false}, {id:"I16", prev:false}] },
+  { id: "I29", op: "dec", type: "INT", latency: 1, deps: [{id:"I29", prev:true}] },
+  { id: "I30", op: "jne", type: "INT", latency: 1, deps: [{id:"I29", prev:false}] }
+];
+
+// --- Simulation Logic ---
+
+function generateProgram(template: any[], iterations: number) {
+  let program = [];
+  for (let iter = 0; iter < iterations; iter++) {
+    for (let inst of template) {
+      let deps = inst.deps.map((d: any) => {
+        let depIter = d.prev ? iter - 1 : iter;
+        return `${depIter}_${d.id}`;
+      });
+      deps = deps.filter((d: string) => !d.startsWith("-1_"));
+      program.push({
+        uid: `${iter}_${inst.id}`,
+        iter: iter,
+        id: inst.id,
+        op: inst.op,
+        type: inst.type,
+        latency: inst.latency,
+        deps: deps
+      });
+    }
+  }
+  return program;
+}
+
+function simulateAll(program: any[]) {
+  let history = [];
+  let state = {
+    cycle: 0,
+    pc: 0,
+    rob: [] as any[],
+    execUnits: { FP: [null, null, null, null], INT: [null, null] } as Record<string, any[]>,
+    completed: new Set<string>(),
+    stats: { fetched: 0, issued: 0, retired: 0, fp_busy: 0, int_busy: 0 }
+  };
+  
+  const cloneState = (s: typeof state) => ({
+    cycle: s.cycle,
+    pc: s.pc,
+    rob: s.rob.map(inst => ({...inst})),
+    execUnits: {
+      FP: s.execUnits.FP.map(u => u ? {...u} : null),
+      INT: s.execUnits.INT.map(u => u ? {...u} : null)
+    },
+    completed: new Set(s.completed),
+    stats: {...s.stats}
+  });
+
+  history.push(cloneState(state));
+
+  while (state.pc < program.length || state.rob.length > 0) {
+    // 1. Retire
+    let retiredThisCycle = 0;
+    while (state.rob.length > 0 && state.rob[0].status === 'done' && retiredThisCycle < 4) {
+      state.rob.shift();
+      retiredThisCycle++;
+      state.stats.retired++;
+    }
+
+    // 2. Execute
+    let fpBusy = 0;
+    let intBusy = 0;
+    for (let type of ['FP', 'INT']) {
+      for (let i = 0; i < state.execUnits[type].length; i++) {
+        let unit = state.execUnits[type][i];
+        if (unit) {
+          if (type === 'FP') fpBusy++;
+          if (type === 'INT') intBusy++;
+          unit.remaining--;
+          if (unit.remaining === 0) {
+            let robInst = state.rob.find(inst => inst.uid === unit.uid);
+            if (robInst) robInst.status = 'done';
+            state.completed.add(unit.uid);
+            state.execUnits[type][i] = null;
+          }
+        }
+      }
+    }
+    state.stats.fp_busy += fpBusy;
+    state.stats.int_busy += intBusy;
+
+    // 3. Issue
+    for (let robInst of state.rob) {
+      if (robInst.status === 'wait') {
+        let ready = true;
+        for (let dep of robInst.deps) {
+          if (!state.completed.has(dep)) {
+            ready = false;
+            break;
+          }
+        }
+        if (ready) {
+          let freeIdx = state.execUnits[robInst.type].findIndex(u => u === null);
+          if (freeIdx !== -1) {
+            state.execUnits[robInst.type][freeIdx] = { ...robInst, remaining: robInst.latency };
+            robInst.status = 'exec';
+            state.stats.issued++;
+          }
+        }
+      }
+    }
+
+    // 4. Fetch
+    let fetchedThisCycle = 0;
+    while (state.rob.length < 24 && fetchedThisCycle < 4 && state.pc < program.length) {
+      let inst = program[state.pc];
+      state.rob.push({ ...inst, status: 'wait' });
+      state.pc++;
+      fetchedThisCycle++;
+      state.stats.fetched++;
+    }
+
+    state.cycle++;
+    history.push(cloneState(state));
+  }
+  
+  return history;
+}
+
+// --- UI Components ---
+
+const iterColors = [
+  'bg-blue-900/40 border-blue-500/50 text-blue-200',
+  'bg-emerald-900/40 border-emerald-500/50 text-emerald-200',
+  'bg-amber-900/40 border-amber-500/50 text-amber-200',
+  'bg-rose-900/40 border-rose-500/50 text-rose-200',
+  'bg-fuchsia-900/40 border-fuchsia-500/50 text-fuchsia-200',
+  'bg-cyan-900/40 border-cyan-500/50 text-cyan-200',
+  'bg-lime-900/40 border-lime-500/50 text-lime-200',
+  'bg-violet-900/40 border-violet-500/50 text-violet-200'
+];
+
+const getIterColor = (iter: number) => iterColors[iter % iterColors.length];
+
+const simplifyOp = (op: string) => {
+  const map: Record<string, string> = {
+    vaddps: 'add', vcmpltps: 'cmp', vtestps: 'test', je: 'je',
+    vsubps: 'sub', vpsubd: 'sub', vmulps: 'mul', dec: 'dec', jne: 'jne',
+    vextractf128: 'extr', vpackssdw: 'pack', vpacksswb: 'pack',
+    vpmovmskb: 'movmsk', test: 'test'
+  };
+  return map[op] || op;
 };
 
-const baseInstructions = [
-  { id: '1', text: 'vaddps ymm12, ymm9, ymm10', type: 'FP', latency: 3, deps: ['11_prev', '10_prev'] },
-  { id: '2', text: 'vcmpltps ymm12, ymm12, ymm4', type: 'FP', latency: 3, deps: ['1'] },
-  { id: '3', text: 'vtestps ymm12, ymm12', type: 'FP', latency: 1, deps: ['2'] },
-  { id: '4', text: 'je .LBB1_6', type: 'INT', latency: 1, deps: ['3'] },
-  { id: '5', text: 'vsubps ymm9, ymm9, ymm10', type: 'FP', latency: 3, deps: ['11_prev', '10_prev'] },
-  { id: '6', text: 'vaddps ymm13, ymm9, ymm7', type: 'FP', latency: 3, deps: ['5'] },
-  { id: '7', text: 'vaddps ymm9, ymm11, ymm11', type: 'FP', latency: 3, deps: ['12_prev'] },
-  { id: '8', text: 'vaddps ymm11, ymm9, ymm6', type: 'FP', latency: 3, deps: ['7'] },
-  { id: '9', text: 'vpsubd ymm8, ymm8, ymm12', type: 'FP', latency: 1, deps: ['2', '9_prev'] },
-  { id: '10', text: 'vmulps ymm9, ymm13, ymm13', type: 'FP', latency: 3, deps: ['6'] },
-  { id: '11', text: 'vmulps ymm10, ymm11, ymm11', type: 'FP', latency: 3, deps: ['8'] },
-  { id: '12', text: 'vmulps ymm11, ymm13, ymm11', type: 'FP', latency: 3, deps: ['6', '8'] },
-  { id: '13', text: 'dec r8d', type: 'INT', latency: 1, deps: ['13_prev'] },
-  { id: '14', text: 'jne .LBB1_4', type: 'INT', latency: 1, deps: ['13'] },
-];
-
-function generateWorkload(unrollFactor: number, totalIterations: number) {
-  const insts: any[] = [];
-  for (let chunk = 0; chunk < totalIterations / unrollFactor; chunk++) {
-    const iters = [];
-    for (let u = 0; u < unrollFactor; u++) {
-      iters.push(chunk * unrollFactor + u);
-    }
-    for (let i = 0; i < baseInstructions.length; i++) {
-      for (let iter of iters) {
-        const base = baseInstructions[i];
-        const id = `${base.id}_${iter}`;
-        const deps = base.deps.map(d => {
-          if (d.endsWith('_prev')) {
-            const prevIter = iter - unrollFactor;
-            if (prevIter < 0) return null; 
-            return `${d.split('_')[0]}_${prevIter}`;
-          }
-          return `${d}_${iter}`;
-        }).filter(d => d !== null);
-        
-        let text = base.text;
-        if (unrollFactor > 1) {
-            if (iter % unrollFactor !== 0) {
-                text = text.replace(/ymm(\d+)/g, (match, p1) => `ymm${parseInt(p1) + 8}`);
-            }
-        }
-
-        insts.push({
-          ...base,
-          id,
-          deps,
-          iter,
-          text
-        });
-      }
-    }
-  }
-  return insts;
-}
-
-function simulate(instructions: any[], config: typeof CONFIG) {
-  const { fetchWidth, robSize, alus } = config;
-  let cycle = 0;
-  const states = [];
+const getRegisters = (inst: any) => {
+  const op = inst.op;
+  const dest = 'r' + inst.id.substring(1);
+  const srcs = inst.deps.map((d: string) => 'r' + d.split('_')[1].substring(1));
   
-  let queue = [...instructions];
-  let rob: any[] = []; 
-  let executing: any[] = []; 
-  let completed = new Set<string>(); 
-  let retiredCount = 0;
+  if (op === 'je' || op === 'jne') return ' .loop';
+  if (op === 'dec') return ` ${dest}`;
   
-  while (queue.length > 0 || rob.length > 0) {
-    executing = executing.filter(e => {
-      if (e.endCycle === cycle) {
-        completed.add(e.inst.id);
-        const robEntry = rob.find(r => r.inst.id === e.inst.id);
-        if (robEntry) robEntry.status = 'DONE';
-        return false;
-      }
-      return true;
-    });
-    
-    let retired = 0;
-    while (rob.length > 0 && rob[0].status === 'DONE' && retired < 8) {
-      rob.shift();
-      retiredCount++;
-      retired++;
-    }
-    
-    const availableALUs = { FP: alus.FP, INT: alus.INT };
-    const aluState = {
-      FP: new Array(alus.FP).fill(null),
-      INT: new Array(alus.INT).fill(null)
-    };
-    
-    executing.forEach(e => {
-      availableALUs[e.aluType as keyof typeof availableALUs]--;
-      aluState[e.aluType as keyof typeof aluState][e.aluIndex] = e;
-    });
-    
-    for (let i = 0; i < rob.length; i++) {
-      const entry = rob[i];
-      if (entry.status === 'ROB') {
-        const ready = entry.inst.deps.every((d: string) => completed.has(d));
-        if (ready && availableALUs[entry.inst.type as keyof typeof availableALUs] > 0) {
-          const freeIndex = aluState[entry.inst.type as keyof typeof aluState].findIndex(x => x === null);
-          if (freeIndex !== -1) {
-            entry.status = 'EXECUTING';
-            availableALUs[entry.inst.type as keyof typeof availableALUs]--;
-            const newExec = {
-              inst: entry.inst,
-              aluType: entry.inst.type,
-              aluIndex: freeIndex,
-              endCycle: cycle + entry.inst.latency
-            };
-            executing.push(newExec);
-            aluState[entry.inst.type as keyof typeof aluState][freeIndex] = newExec;
-          }
-        }
-      }
-    }
-    
-    let fetched = 0;
-    while (fetched < fetchWidth && queue.length > 0 && rob.length < robSize) {
-      const inst = queue.shift();
-      rob.push({ inst, status: 'ROB' });
-      fetched++;
-    }
-    
-    states.push({
-      cycle,
-      queue: queue.map(q => ({...q})),
-      rob: rob.map(r => ({...r})),
-      alus: {
-        FP: [...aluState.FP],
-        INT: [...aluState.INT]
-      },
-      completed: new Set(completed),
-      retiredCount
-    });
-    
-    cycle++;
-    if (cycle > 500) break;
+  if (op === 'vtestps' || op === 'test') {
+    return ` ${srcs[0] || dest}, ${srcs[1] || srcs[0] || dest}`;
   }
   
-  return states;
-}
-
-const ITER_COLORS = [
-  'bg-blue-500/20 border-blue-500/50 text-blue-300',
-  'bg-green-500/20 border-green-500/50 text-green-300',
-  'bg-purple-500/20 border-purple-500/50 text-purple-300',
-  'bg-orange-500/20 border-orange-500/50 text-orange-300',
-  'bg-pink-500/20 border-pink-500/50 text-pink-300',
-  'bg-teal-500/20 border-teal-500/50 text-teal-300',
-];
-
-const SimulatorView = ({ title, state }: { title: string, state: any }) => {
-  if (!state) return null;
+  if (op === 'vpmovmskb') {
+    return ` ${dest}, ${srcs[0] || 'r0'}`;
+  }
   
-  const ipc = state.cycle > 0 ? (state.retiredCount / state.cycle).toFixed(2) : "0.00";
-  const progress = (state.retiredCount / 56) * 100;
+  if (op === 'vextractf128') {
+    return ` ${dest}, ${srcs[0] || 'r0'}, 1`;
+  }
+  
+  const src1 = srcs[0] || 'r0';
+  const src2 = srcs.length > 1 ? srcs[1] : 'r0';
+  
+  return ` ${dest}, ${src1}, ${src2}`;
+};
+
+const InstCard = ({ inst, simplify, className = "", hideStatus = false, showRegisters = false }: any) => {
+  if (!inst) return null;
+  
+  const color = getIterColor(inst.iter);
+  let opName = simplify ? simplifyOp(inst.op) : inst.op;
+  
+  if (showRegisters) {
+    opName += getRegisters(inst);
+  }
+  
+  let statusStyle = "";
+  if (inst.status === 'exec') {
+    statusStyle = "shadow-[0_0_12px_rgba(255,255,255,0.3)] border-white/60 brightness-125";
+  } else if (inst.status === 'done') {
+    statusStyle = "opacity-40 grayscale border-white/10";
+  }
+  
+  return (
+    <div className={`flex flex-col justify-center items-center rounded border text-[10px] font-mono relative overflow-hidden ${color} ${statusStyle} ${className}`}>
+      <span className="absolute top-0.5 left-1 text-[8px] opacity-70">i:{inst.iter}</span>
+      {inst.status && !hideStatus && (
+        <span className="absolute top-0.5 right-1 text-[7px] font-bold opacity-70 uppercase">{inst.status}</span>
+      )}
+      <span className="font-bold tracking-tight whitespace-nowrap overflow-hidden text-ellipsis px-1 max-w-full text-center">{opName}</span>
+    </div>
+  );
+};
+
+const Window = ({ title, history, currentCycle, program, simplify }: any) => {
+  const state = history[Math.min(currentCycle, history.length - 1)];
+  
+  const ipc = state.cycle > 0 ? (state.stats.retired / state.cycle).toFixed(2) : "0.00";
+  const fpUtil = state.cycle > 0 ? ((state.stats.fp_busy / (state.cycle * 4)) * 100).toFixed(1) : "0.0";
+  const intUtil = state.cycle > 0 ? ((state.stats.int_busy / (state.cycle * 2)) * 100).toFixed(1) : "0.0";
 
   return (
-    <div className="bg-[#161b22] rounded-xl border border-[#30363d] overflow-hidden flex flex-col shadow-xl">
-      <div className="p-4 border-b border-[#30363d] flex justify-between items-center bg-[#21262d]/50">
-        <h2 className="text-lg font-semibold text-white">{title}</h2>
-        <div className="flex gap-4 text-sm font-mono">
-          <div className="flex flex-col items-end">
-            <span className="text-gray-400">CYCLE</span>
-            <span className="text-xl text-blue-400">{state.cycle}</span>
+    <div className="flex flex-col gap-4 p-5 bg-zinc-900 rounded-xl border border-white/10 shadow-2xl">
+      <div className="flex justify-between items-center border-b border-white/10 pb-3">
+        <h2 className="text-lg font-bold text-white tracking-tight">{title}</h2>
+        <div className="flex gap-4 text-xs font-mono text-zinc-400 bg-black/40 px-3 py-1.5 rounded-lg border border-white/5">
+          <div>Cycle: <span className="text-white font-semibold">{state.cycle}</span></div>
+          <div>IPC: <span className="text-emerald-400 font-semibold">{ipc}</span></div>
+          <div>FP Util: <span className="text-blue-400 font-semibold">{fpUtil}%</span></div>
+          <div>INT Util: <span className="text-amber-400 font-semibold">{intUtil}%</span></div>
+        </div>
+      </div>
+      
+      <div className="grid grid-cols-3 gap-6">
+        {/* Fetch Queue */}
+        <div className="col-span-1 flex flex-col gap-2">
+          <h3 className="text-[10px] font-semibold text-zinc-500 uppercase tracking-widest">Fetch Queue</h3>
+          <div className="relative h-[340px] overflow-hidden bg-black/60 p-2 rounded-lg border border-white/5 shadow-inner">
+            <motion.div 
+              className="flex flex-col gap-1 absolute top-2 w-[calc(100%-16px)]"
+              animate={{ y: (1 - Math.max(0, state.pc - 4)) * 52 }}
+              transition={{ type: "spring", stiffness: 300, damping: 30 }}
+            >
+              {program.map((inst: any, i: number) => {
+                if (Math.abs(i - state.pc) > 15) return <div key={inst.uid} className="h-12 shrink-0" />;
+                
+                const activeStart = Math.max(0, state.pc - 4);
+                const isActive = i >= activeStart && i < state.pc;
+                const opacity = isActive ? "opacity-100" : "opacity-40 grayscale";
+                
+                return (
+                  <InstCard 
+                    key={inst.uid}
+                    inst={inst} 
+                    simplify={simplify} 
+                    className={`h-12 shrink-0 ${opacity} transition-all duration-300`} 
+                    hideStatus={true}
+                    showRegisters={true}
+                  />
+                );
+              })}
+            </motion.div>
           </div>
-          <div className="flex flex-col items-end">
-            <span className="text-gray-400">IPC</span>
-            <span className="text-xl text-emerald-400">{ipc}</span>
+        </div>
+        
+        {/* ROB */}
+        <div className="col-span-2 flex flex-col gap-2">
+          <h3 className="text-[10px] font-semibold text-zinc-500 uppercase tracking-widest">Reorder Buffer (ROB)</h3>
+          <div className="grid grid-cols-4 gap-1.5 bg-black/60 p-2 rounded-lg border border-white/5 h-[340px] content-start shadow-inner overflow-hidden">
+            <AnimatePresence>
+              {state.rob.map((inst: any) => (
+                <motion.div 
+                  key={inst.uid} 
+                  layout 
+                  initial={{ opacity: 0, scale: 0.8 }}
+                  animate={{ opacity: 1, scale: 1 }}
+                  exit={{ opacity: 0, scale: 0.8 }}
+                  transition={{ type: "spring", stiffness: 400, damping: 35 }}
+                >
+                  <InstCard inst={inst} simplify={simplify} className="h-12 w-full" />
+                </motion.div>
+              ))}
+            </AnimatePresence>
           </div>
         </div>
       </div>
       
-      <div className="h-1 bg-[#0d1117]">
-        <div className="h-full bg-blue-500 transition-all duration-300" style={{ width: `${progress}%` }} />
-      </div>
-
-      <div className="p-4 space-y-6 flex-1">
+      {/* Execution Units */}
+      <div className="flex flex-col gap-4 mt-2">
+        <h3 className="text-[10px] font-semibold text-zinc-500 uppercase tracking-widest">Execution Units</h3>
         
-        <div>
-          <h3 className="text-xs font-bold text-gray-500 mb-2 uppercase tracking-wider">Fetch Queue</h3>
-          <div className="flex flex-col gap-1 h-[100px] overflow-hidden relative">
-            {state.queue.length === 0 && (
-              <div className="absolute inset-0 flex items-center justify-center text-gray-600 italic text-sm">Queue Empty</div>
-            )}
-            {state.queue.slice(0, 4).map((inst: any, i: number) => (
-              <div key={i} className={`px-3 py-1.5 rounded border text-xs font-mono flex justify-between items-center ${ITER_COLORS[inst.iter % 6]}`}>
-                <span>{inst.text}</span>
-                <span className="opacity-50 text-[10px]">Iter {inst.iter}</span>
+        {/* FP ALUs */}
+        <div className="grid grid-cols-4 gap-4">
+          {state.execUnits.FP.map((unit: any, i: number) => (
+            <div key={`fp-${i}`} className="flex flex-col gap-1.5 bg-black/40 p-2 rounded-lg border border-white/5 shadow-inner">
+              <div className="text-[9px] text-zinc-500 uppercase tracking-wider font-semibold text-center">FP ALU {i}</div>
+              <div className="h-12 rounded border border-white/10 bg-black/60 relative overflow-hidden">
+                <AnimatePresence>
+                  {unit && (
+                    <motion.div 
+                      key={unit.uid}
+                      initial={{ opacity: 0, scale: 0.8 }}
+                      animate={{ opacity: 1, scale: 1 }}
+                      exit={{ opacity: 0, scale: 0.8 }}
+                      className="absolute inset-0"
+                    >
+                      <InstCard inst={unit} simplify={simplify} className="h-full w-full border-none" hideStatus={true} />
+                    </motion.div>
+                  )}
+                </AnimatePresence>
               </div>
-            ))}
-            {state.queue.length > 4 && (
-              <div className="text-center text-xs text-gray-600 mt-1">+{state.queue.length - 4} more...</div>
-            )}
-          </div>
-        </div>
-
-        <div>
-          <div className="flex justify-between items-end mb-2">
-            <h3 className="text-xs font-bold text-gray-500 uppercase tracking-wider">Reorder Buffer (ROB)</h3>
-            <span className="text-xs text-gray-500">{state.rob.length} / 24</span>
-          </div>
-          <div className="grid grid-cols-4 sm:grid-cols-6 gap-1.5">
-            {Array.from({ length: 24 }).map((_, i) => {
-              const entry = state.rob[i];
-              if (!entry) return <div key={i} className="h-14 bg-[#0d1117] rounded border border-[#30363d]/50" />;
-              
-              const colorClass = ITER_COLORS[entry.inst.iter % 6];
-              const isExecuting = entry.status === 'EXECUTING';
-              const isDone = entry.status === 'DONE';
-              
-              return (
-                <div key={i} className={`h-14 p-1.5 rounded border text-[10px] flex flex-col justify-between transition-all ${colorClass} ${isExecuting ? 'ring-1 ring-white/50 shadow-[0_0_10px_rgba(255,255,255,0.2)]' : ''} ${isDone ? 'opacity-40 grayscale' : ''}`}>
-                  <div className="font-mono truncate font-bold">{entry.inst.text.split(' ')[0]}</div>
-                  <div className="flex justify-between items-center mt-1">
-                    <span className="bg-black/30 px-1 rounded">i:{entry.inst.iter}</span>
-                    <span className="font-bold">
-                      {entry.status === 'ROB' ? 'WAIT' : entry.status === 'EXECUTING' ? 'EXEC' : 'DONE'}
-                    </span>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-
-        <div>
-          <h3 className="text-xs font-bold text-gray-500 mb-2 uppercase tracking-wider">Execution Units</h3>
-          <div className="grid grid-cols-4 gap-2 mb-2">
-            {state.alus.FP.map((exec: any, i: number) => (
-              <div key={`fp-${i}`} className="h-20 bg-[#0d1117] rounded-lg border border-[#30363d] p-2 flex flex-col relative overflow-hidden">
-                <div className="text-[10px] text-gray-500 font-bold mb-1 z-10">FP ALU {i}</div>
-                {exec ? (
-                  <>
-                    <div className={`flex-1 text-xs font-mono p-1.5 rounded flex flex-col justify-center z-10 ${ITER_COLORS[exec.inst.iter % 6]}`}>
-                      <span className="truncate">{exec.inst.text.split(' ')[0]}</span>
-                      <span className="text-[9px] opacity-70 truncate">{exec.inst.text.split(' ').slice(1).join(' ')}</span>
-                    </div>
-                    <div className="absolute bottom-0 left-0 h-1 bg-white/20 w-full z-10">
-                      <div 
-                        className="h-full bg-white/60 transition-all duration-300" 
-                        style={{ width: `${((exec.inst.latency - (exec.endCycle - state.cycle)) / exec.inst.latency) * 100}%` }} 
-                      />
-                    </div>
-                  </>
-                ) : (
-                  <div className="flex-1 flex items-center justify-center text-xs text-gray-600 italic z-10">IDLE</div>
+              <div className="h-1.5 bg-black/80 rounded-full overflow-hidden border border-white/5">
+                {unit && (
+                  <div 
+                    className="h-full bg-blue-500 transition-all duration-200 ease-linear"
+                    style={{ width: `${((unit.latency - unit.remaining + 1) / unit.latency) * 100}%` }}
+                  />
                 )}
               </div>
-            ))}
-          </div>
-          <div className="grid grid-cols-2 gap-2">
-            {state.alus.INT.map((exec: any, i: number) => (
-              <div key={`int-${i}`} className="h-20 bg-[#0d1117] rounded-lg border border-[#30363d] p-2 flex flex-col relative overflow-hidden">
-                <div className="text-[10px] text-gray-500 font-bold mb-1 z-10">INT ALU {i}</div>
-                {exec ? (
-                  <>
-                    <div className={`flex-1 text-xs font-mono p-1.5 rounded flex flex-col justify-center z-10 ${ITER_COLORS[exec.inst.iter % 6]}`}>
-                      <span className="truncate">{exec.inst.text.split(' ')[0]}</span>
-                      <span className="text-[9px] opacity-70 truncate">{exec.inst.text.split(' ').slice(1).join(' ')}</span>
-                    </div>
-                    <div className="absolute bottom-0 left-0 h-1 bg-white/20 w-full z-10">
-                      <div 
-                        className="h-full bg-white/60 transition-all duration-300" 
-                        style={{ width: `${((exec.inst.latency - (exec.endCycle - state.cycle)) / exec.inst.latency) * 100}%` }} 
-                      />
-                    </div>
-                  </>
-                ) : (
-                  <div className="flex-1 flex items-center justify-center text-xs text-gray-600 italic z-10">IDLE</div>
-                )}
-              </div>
-            ))}
-          </div>
+            </div>
+          ))}
         </div>
 
+        {/* INT ALUs */}
+        <div className="grid grid-cols-4 gap-4">
+          {state.execUnits.INT.map((unit: any, i: number) => (
+            <div key={`int-${i}`} className="flex flex-col gap-1.5 bg-black/40 p-2 rounded-lg border border-white/5 shadow-inner">
+              <div className="text-[9px] text-zinc-500 uppercase tracking-wider font-semibold text-center">INT ALU {i}</div>
+              <div className="h-12 rounded border border-white/10 bg-black/60 relative overflow-hidden">
+                <AnimatePresence>
+                  {unit && (
+                    <motion.div 
+                      key={unit.uid}
+                      initial={{ opacity: 0, scale: 0.8 }}
+                      animate={{ opacity: 1, scale: 1 }}
+                      exit={{ opacity: 0, scale: 0.8 }}
+                      className="absolute inset-0"
+                    >
+                      <InstCard inst={unit} simplify={simplify} className="h-full w-full border-none" hideStatus={true} />
+                    </motion.div>
+                  )}
+                </AnimatePresence>
+              </div>
+              <div className="h-1.5 bg-black/80 rounded-full overflow-hidden border border-white/5">
+                {unit && (
+                  <div 
+                    className="h-full bg-amber-500 transition-all duration-200 ease-linear"
+                    style={{ width: `${((unit.latency - unit.remaining + 1) / unit.latency) * 100}%` }}
+                  />
+                )}
+              </div>
+            </div>
+          ))}
+          <div className="col-span-2"></div>
+        </div>
       </div>
     </div>
   );
 };
 
 export default function App() {
-  const [states1, setStates1] = useState<any[]>([]);
-  const [states2, setStates2] = useState<any[]>([]);
-  const [currentCycle, setCurrentCycle] = useState(0);
-  const [isPlaying, setIsPlaying] = useState(false);
-  const [speed, setSpeed] = useState(1000);
+  const [playing, setPlaying] = useState(false);
+  const [cycle, setCycle] = useState(0);
+  const [speed, setSpeed] = useState(900);
+  const [simplify, setSimplify] = useState(true);
 
-  useEffect(() => {
-    const insts1 = generateWorkload(1, 4);
-    const insts2 = generateWorkload(2, 4);
-    setStates1(simulate(insts1, CONFIG));
-    setStates2(simulate(insts2, CONFIG));
+  const { nonUnrolledProgram, unrolledProgram, nonUnrolledHistory, unrolledHistory, maxCycle } = useMemo(() => {
+    const p1 = generateProgram(nonUnrolledTemplate, 16);
+    const p2 = generateProgram(unrolledTemplate, 8);
+    const h1 = simulateAll(p1);
+    const h2 = simulateAll(p2);
+    return {
+      nonUnrolledProgram: p1,
+      unrolledProgram: p2,
+      nonUnrolledHistory: h1,
+      unrolledHistory: h2,
+      maxCycle: Math.max(h1.length, h2.length) - 1
+    };
   }, []);
 
-  const maxCycles = Math.max(states1.length, states2.length);
-
   useEffect(() => {
-    let timer: any;
-    if (isPlaying && currentCycle < maxCycles - 1) {
-      timer = setTimeout(() => {
-        setCurrentCycle(c => c + 1);
+    let interval: any;
+    if (playing && cycle < maxCycle) {
+      interval = setInterval(() => {
+        setCycle(c => Math.min(c + 1, maxCycle));
       }, speed);
-    } else if (currentCycle >= maxCycles - 1) {
-      setIsPlaying(false);
+    } else if (cycle >= maxCycle) {
+      setPlaying(false);
     }
-    return () => clearTimeout(timer);
-  }, [isPlaying, currentCycle, maxCycles, speed]);
+    return () => clearInterval(interval);
+  }, [playing, cycle, speed, maxCycle]);
 
-  if (states1.length === 0 || states2.length === 0) return null;
+  const handleSeek = (e: React.ChangeEvent<HTMLInputElement>) => {
+    setCycle(parseInt(e.target.value));
+  };
 
   return (
-    <div className="min-h-screen bg-[#0d1117] text-[#c9d1d9] p-4 md:p-8 font-sans">
-      <div className="max-w-7xl mx-auto space-y-8">
-        
-        <div className="flex flex-col md:flex-row justify-between items-center bg-[#161b22] p-4 rounded-xl border border-[#30363d] shadow-lg">
+    <div className="min-h-screen bg-black text-zinc-300 font-sans p-6 flex flex-col gap-6">
+      {/* Header */}
+      <div className="flex items-center justify-between bg-zinc-900 p-4 rounded-xl border border-white/10 shadow-lg">
+        <div className="flex items-center gap-4">
+          <div className="h-10 w-10 bg-emerald-500/20 rounded-lg flex items-center justify-center border border-emerald-500/50">
+            <Settings2 className="text-emerald-400" size={24} />
+          </div>
           <div>
-            <h1 className="text-2xl font-bold text-white">Mandelbrot ILP Showcase</h1>
-            <p className="text-sm text-gray-400">Mandelbrot Loop: Non-Unrolled vs Unrolled</p>
-          </div>
-          
-          <div className="flex items-center gap-4 mt-4 md:mt-0">
-            <div className="flex bg-[#0d1117] rounded-lg p-1 border border-[#30363d]">
-              <button onClick={() => setIsPlaying(!isPlaying)} className="p-2 hover:bg-[#21262d] rounded text-white transition-colors">
-                {isPlaying ? <Pause size={20} /> : <Play size={20} />}
-              </button>
-              <button onClick={() => setCurrentCycle(c => Math.min(maxCycles - 1, c + 1))} className="p-2 hover:bg-[#21262d] rounded text-white transition-colors">
-                <SkipForward size={20} />
-              </button>
-              <button onClick={() => { setCurrentCycle(0); setIsPlaying(false); }} className="p-2 hover:bg-[#21262d] rounded text-white transition-colors">
-                <RotateCcw size={20} />
-              </button>
-            </div>
-            
-            <div className="flex items-center gap-2 text-sm">
-              <span className="text-gray-400">Speed:</span>
-              <select 
-                value={speed} 
-                onChange={e => setSpeed(Number(e.target.value))}
-                className="bg-[#0d1117] border border-[#30363d] rounded p-1.5 text-white outline-none focus:border-blue-500"
-              >
-                <option value={2000}>1x (Slow)</option>
-                <option value={1000}>2x (Normal)</option>
-                <option value={500}>5x (Fast)</option>
-              </select>
-            </div>
+            <h1 className="text-xl font-bold text-white tracking-tight">Mandelbrot ILP Showcase</h1>
+            <p className="text-xs text-zinc-400">Instruction Level Parallelism: Unrolled vs Non-Unrolled</p>
           </div>
         </div>
 
-        <div className="grid grid-cols-1 xl:grid-cols-2 gap-8">
-          <SimulatorView title="Non-Unrolled (1x)" state={states1[Math.min(currentCycle, states1.length - 1)]} />
-          <SimulatorView title="Unrolled (2x)" state={states2[Math.min(currentCycle, states2.length - 1)]} />
-        </div>
+        <div className="flex items-center gap-6">
+          <div className="flex items-center gap-2 bg-black/40 p-1.5 rounded-lg border border-white/5">
+            <button 
+              onClick={() => setCycle(0)}
+              className="p-2 hover:bg-white/10 rounded text-zinc-400 hover:text-white transition-colors"
+              title="Reset"
+            >
+              <Rewind size={18} />
+            </button>
+            <button 
+              onClick={() => setCycle(c => Math.max(0, c - 1))}
+              className="p-2 hover:bg-white/10 rounded text-zinc-400 hover:text-white transition-colors"
+              title="Previous Cycle"
+            >
+              <ChevronLeft size={18} />
+            </button>
+            <button 
+              onClick={() => setPlaying(!playing)}
+              className="p-2 bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-400 rounded transition-colors w-10 flex justify-center"
+            >
+              {playing ? <Square size={18} /> : <Play size={18} className="ml-1" />}
+            </button>
+            <button 
+              onClick={() => setCycle(c => Math.min(maxCycle, c + 1))}
+              className="p-2 hover:bg-white/10 rounded text-zinc-400 hover:text-white transition-colors"
+              title="Next Cycle"
+            >
+              <ChevronRight size={18} />
+            </button>
+            <button 
+              onClick={() => setCycle(maxCycle)}
+              className="p-2 hover:bg-white/10 rounded text-zinc-400 hover:text-white transition-colors"
+              title="End"
+            >
+              <FastForward size={18} />
+            </button>
+          </div>
 
+          <div className="flex items-center gap-3 bg-black/40 px-4 py-2 rounded-lg border border-white/5">
+            <span className="text-xs font-semibold text-zinc-500 uppercase tracking-wider">Speed</span>
+            <div className="flex gap-1">
+              {[
+                { label: 'Slow', value: 2250 },
+                { label: 'Normal', value: 900 },
+                { label: 'Fast', value: 300 }
+              ].map(s => (
+                <button
+                  key={s.label}
+                  onClick={() => setSpeed(s.value)}
+                  className={`px-2 py-1 text-xs rounded transition-colors ${speed === s.value ? 'bg-white/20 text-white' : 'text-zinc-400 hover:bg-white/10'}`}
+                >
+                  {s.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <label className="flex items-center gap-2 cursor-pointer bg-black/40 px-4 py-2 rounded-lg border border-white/5">
+            <input 
+              type="checkbox" 
+              checked={simplify} 
+              onChange={e => setSimplify(e.target.checked)}
+              className="accent-emerald-500"
+            />
+            <span className="text-xs font-semibold text-zinc-400 uppercase tracking-wider">Simplify Ops</span>
+          </label>
+        </div>
+      </div>
+
+      {/* Timeline Scrubber */}
+      <div className="bg-zinc-900 p-4 rounded-xl border border-white/10 shadow-lg flex items-center gap-4">
+        <span className="text-xs font-mono text-zinc-500 w-12 text-right">{cycle}</span>
+        <input 
+          type="range" 
+          min="0" 
+          max={maxCycle} 
+          value={cycle} 
+          onChange={handleSeek}
+          className="flex-1 h-2 bg-black/60 rounded-lg appearance-none cursor-pointer accent-emerald-500"
+        />
+        <span className="text-xs font-mono text-zinc-500 w-12">{maxCycle}</span>
+      </div>
+
+      {/* Main Content */}
+      <div className="grid grid-cols-2 gap-6 flex-1 min-h-0">
+        <Window 
+          title="Non-Unrolled" 
+          history={nonUnrolledHistory} 
+          currentCycle={cycle} 
+          program={nonUnrolledProgram}
+          simplify={simplify}
+        />
+        <Window 
+          title="Unrolled 2x" 
+          history={unrolledHistory} 
+          currentCycle={cycle} 
+          program={unrolledProgram}
+          simplify={simplify}
+        />
       </div>
     </div>
   );
 }
-
